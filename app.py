@@ -6,8 +6,8 @@ import streamlit as st
 from PIL import Image, ImageDraw, ImageFont
 
 # --- FONT PATHS (update if deploying to Linux server) ---
-FONT_PATH       = "/Library/Fonts/TikTokSans-Medium.ttf"
-EMOJI_FONT_PATH = "/System/Library/Fonts/Apple Color Emoji.ttc"
+FONT_PATH = "TikTokSans-Medium.ttf"
+EMOJI_FONT_PATH = "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf"
 
 # --- TEXT VARIATIONS ---
 SALE_TEXTS = [
