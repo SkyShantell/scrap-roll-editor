@@ -485,6 +485,7 @@ st.set_page_config(
 )
 
 st.title("🎬 Scrap & Roll Auto Editor")
+st.caption("Version: Bulk Preview v1 • 80px emojis • 100% music")
 st.markdown(
     "Process one video or upload a batch. Every video receives its own product "
     "name, random sale text, emoji, urgency text, and background song."
@@ -598,14 +599,30 @@ else:
         product_names: list[str] = []
 
         for index, uploaded_file in enumerate(uploaded_files, start=1):
-            st.markdown(f"**{index}. {uploaded_file.name}**")
-            product_name = st.text_input(
-                f"Product name for video {index}",
-                placeholder="Enter the product name shown in this video",
-                key=f"bulk_product_{index}_{uploaded_file.name}_{uploaded_file.size}",
-                label_visibility="collapsed",
-            )
+            st.markdown(f"### Video {index}")
+
+            preview_column, name_column = st.columns([1, 1.15])
+
+            with preview_column:
+                st.video(uploaded_file.getvalue())
+                st.caption(uploaded_file.name)
+
+            with name_column:
+                product_name = st.text_input(
+                    f"Product name for video {index}",
+                    placeholder="Enter the product name shown in this video",
+                    key=(
+                        f"bulk_product_{index}_"
+                        f"{uploaded_file.name}_{uploaded_file.size}"
+                    ),
+                    help=(
+                        "Watch the preview on the left, then enter the exact "
+                        "product name that should appear on this video."
+                    ),
+                )
+
             product_names.append(product_name.strip())
+            st.markdown("---")
 
         missing_name_numbers = [
             str(index)
