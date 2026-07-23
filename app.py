@@ -121,7 +121,7 @@ def make_banner_overlay(
     red_text_w, red_text_h = text_size(sale_text, font_red)
     white_text_w, white_text_h = text_size(urgency_text, font_white)
 
-    emoji_size = 96
+    emoji_size = 109
     emoji_gap = 12
     emoji_width = 0
     emoji_font = None
