@@ -1,8 +1,11 @@
+import io
 import os
 import random
+import re
 import shutil
 import subprocess
 import tempfile
+import zipfile
 from pathlib import Path
 
 import streamlit as st
@@ -23,7 +26,7 @@ EMOJI_FONT_CANDIDATES = [
 
 SUPPORTED_MUSIC_FORMATS = {".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac"}
 
-# The PNG filenames should match the assets generated on the Mac.
+# The PNG filenames should match the Apple-style assets generated on the Mac.
 EMOJI_OPTIONS = [
     ("🚨", "alert.png"),
     ("⚡", "lightning.png"),
@@ -71,7 +74,7 @@ PROD_STROKE = 7
 BADGE_TOP = int(CANVAS_H * 0.115)
 
 # Requested settings.
-EMOJI_RENDER_SIZE = 100
+EMOJI_RENDER_SIZE = 80
 MUSIC_VOLUME = 1.0
 
 
@@ -111,7 +114,7 @@ def find_emoji_font() -> Path | None:
 def load_emoji_image(emoji: str, asset_filename: str) -> Image.Image | None:
     """
     Prefer an Apple-style transparent PNG from emoji_assets.
-    If unavailable, render Noto/Apple Color Emoji and resize it to 80px.
+    If unavailable, render the installed color emoji font and resize to 80px.
     """
     asset_path = EMOJI_ASSET_FOLDER / asset_filename
 
@@ -132,13 +135,7 @@ def load_emoji_image(emoji: str, asset_filename: str) -> Image.Image | None:
 
     try:
         # Noto Color Emoji commonly renders only at its embedded 109px strike.
-        render_size = 109
-        emoji_font = ImageFont.truetype(
-            str(font_path),
-            render_size,
-            index=0,
-        )
-
+        emoji_font = ImageFont.truetype(str(font_path), 109, index=0)
         temp = Image.new("RGBA", (180, 180), (0, 0, 0, 0))
         temp_draw = ImageDraw.Draw(temp)
         bbox = temp_draw.textbbox((0, 0), emoji, font=emoji_font)
@@ -194,9 +191,7 @@ def make_banner_overlay(
 
     if emoji_image:
         emoji_w, emoji_h = emoji_image.size
-        content_width = (
-            emoji_w + emoji_gap + red_text_w + emoji_gap + emoji_w
-        )
+        content_width = emoji_w + emoji_gap + red_text_w + emoji_gap + emoji_w
         red_content_h = max(red_text_h, emoji_h)
     else:
         emoji_w = emoji_h = 0
@@ -252,7 +247,6 @@ def make_banner_overlay(
             anchor="lm",
         )
         cursor_x += red_text_w + emoji_gap
-
         img.alpha_composite(emoji_image, (cursor_x, emoji_y))
     else:
         draw.text(
@@ -275,10 +269,7 @@ def make_banner_overlay(
     )
 
     draw.text(
-        (
-            CANVAS_W // 2,
-            white_pill_y + white_pill_h + PROD_GAP,
-        ),
+        (CANVAS_W // 2, white_pill_y + white_pill_h + PROD_GAP),
         product_name,
         font=font_product,
         fill=WHITE_COLOR,
@@ -412,6 +403,80 @@ def process_video(
     run_command(command)
 
 
+def safe_output_filename(product_name: str, index: int | None = None) -> str:
+    """Create a safe, predictable MP4 filename."""
+    cleaned = re.sub(r"[^A-Za-z0-9_-]+", "_", product_name.strip())
+    cleaned = re.sub(r"_+", "_", cleaned).strip("_") or "product"
+
+    if index is not None:
+        return f"{index:02d}_{cleaned}_edited.mp4"
+    return f"{cleaned}_edited.mp4"
+
+
+def uploaded_signature(files: list) -> tuple[tuple[str, int], ...]:
+    return tuple((uploaded.name, int(uploaded.size)) for uploaded in files)
+
+
+def create_zip_bytes(results: list[dict]) -> bytes:
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for result in results:
+            archive.writestr(result["output_name"], result["video_bytes"])
+    return zip_buffer.getvalue()
+
+
+def process_uploaded_video(
+    uploaded_file,
+    product_name: str,
+    temp_dir: str,
+    item_index: int | None = None,
+) -> dict:
+    """Process one uploaded video and return its downloadable data."""
+    prefix = f"{item_index:02d}_" if item_index is not None else ""
+    safe_upload_name = Path(uploaded_file.name).name
+    input_path = os.path.join(temp_dir, f"{prefix}{safe_upload_name}")
+    overlay_path = os.path.join(temp_dir, f"{prefix}overlay.png")
+    output_path = os.path.join(temp_dir, f"{prefix}output.mp4")
+
+    with open(input_path, "wb") as file:
+        file.write(uploaded_file.getbuffer())
+
+    sale_text = random.choice(SALE_TEXTS)
+    urgency_text = random.choice(URGENCY_TEXTS)
+    emoji, emoji_asset = random.choice(EMOJI_OPTIONS)
+    selected_song = choose_random_song()
+
+    make_banner_overlay(
+        product_name=product_name.strip(),
+        out_path=overlay_path,
+        sale_text=sale_text,
+        urgency_text=urgency_text,
+        emoji=emoji,
+        emoji_asset=emoji_asset,
+    )
+
+    process_video(
+        input_path=input_path,
+        overlay_path=overlay_path,
+        music_path=str(selected_song),
+        output_path=output_path,
+    )
+
+    with open(output_path, "rb") as file:
+        video_bytes = file.read()
+
+    return {
+        "source_name": uploaded_file.name,
+        "product_name": product_name.strip(),
+        "output_name": safe_output_filename(product_name, item_index),
+        "video_bytes": video_bytes,
+        "sale_text": sale_text,
+        "urgency_text": urgency_text,
+        "emoji": emoji,
+        "song_name": selected_song.stem,
+    }
+
+
 # ── Streamlit UI ──────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="Scrap & Roll Video Editor",
@@ -421,8 +486,8 @@ st.set_page_config(
 
 st.title("🎬 Scrap & Roll Auto Editor")
 st.markdown(
-    "Upload a product video, enter the product name, and download the edited "
-    "version with a randomly selected background song."
+    "Process one video or upload a batch. Every video receives its own product "
+    "name, random sale text, emoji, urgency text, and background song."
 )
 
 # Helpful deployment diagnostic.
@@ -445,74 +510,248 @@ else:
         "beside `app.py`, then commit the folder to GitHub."
     )
 
-product_name = st.text_input(
-    "Product Name",
-    placeholder="e.g. HiSmile Mouthwash",
+mode = st.radio(
+    "Processing mode",
+    options=["Single video", "Bulk videos"],
+    horizontal=True,
 )
 
-uploaded = st.file_uploader(
-    "Upload Video (MP4 or MOV, max 20MB)",
-    type=["mp4", "mov"],
-)
+# ── Single-video mode ─────────────────────────────────────────────────────────
+if mode == "Single video":
+    product_name = st.text_input(
+        "Product Name",
+        placeholder="e.g. HiSmile Mouthwash",
+        key="single_product_name",
+    )
 
-process_disabled = (
-    not product_name.strip()
-    or uploaded is None
-    or music_count == 0
-    or bool(missing_tools)
-)
+    uploaded = st.file_uploader(
+        "Upload Video (MP4 or MOV)",
+        type=["mp4", "mov"],
+        key="single_uploader",
+    )
 
-if st.button("✨ Process Video", disabled=process_disabled):
-    with st.spinner("Processing your video..."):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            safe_upload_name = Path(uploaded.name).name
-            input_path = os.path.join(temp_dir, safe_upload_name)
-            overlay_path = os.path.join(temp_dir, "overlay.png")
-            output_path = os.path.join(temp_dir, "output.mp4")
+    process_disabled = (
+        not product_name.strip()
+        or uploaded is None
+        or music_count == 0
+        or bool(missing_tools)
+    )
 
-            with open(input_path, "wb") as file:
-                file.write(uploaded.getbuffer())
+    if st.button("✨ Process Video", disabled=process_disabled):
+        st.session_state.pop("single_result", None)
 
-            sale_text = random.choice(SALE_TEXTS)
-            urgency_text = random.choice(URGENCY_TEXTS)
-            emoji, emoji_asset = random.choice(EMOJI_OPTIONS)
-            selected_song = choose_random_song()
+        with st.spinner("Processing your video..."):
+            with tempfile.TemporaryDirectory() as temp_dir:
+                try:
+                    result = process_uploaded_video(
+                        uploaded_file=uploaded,
+                        product_name=product_name,
+                        temp_dir=temp_dir,
+                    )
+                    result["input_signature"] = (uploaded.name, int(uploaded.size))
+                    st.session_state["single_result"] = result
+                except Exception as error:
+                    st.error("The video could not be processed.")
+                    with st.expander("Technical error details"):
+                        st.code(str(error))
 
-            try:
-                make_banner_overlay(
-                    product_name=product_name.strip(),
-                    out_path=overlay_path,
-                    sale_text=sale_text,
-                    urgency_text=urgency_text,
-                    emoji=emoji,
-                    emoji_asset=emoji_asset,
-                )
+    single_result = st.session_state.get("single_result")
+    current_signature = (
+        (uploaded.name, int(uploaded.size)) if uploaded is not None else None
+    )
 
-                process_video(
-                    input_path=input_path,
-                    overlay_path=overlay_path,
-                    music_path=str(selected_song),
-                    output_path=output_path,
-                )
+    if (
+        single_result
+        and single_result.get("input_signature") == current_signature
+        and single_result.get("product_name") == product_name.strip()
+    ):
+        st.success(
+            f"✅ Done! Used {single_result['emoji']} "
+            f"**{single_result['sale_text']}** | "
+            f"**{single_result['urgency_text']}** | "
+            f"🎵 **{single_result['song_name']}**"
+        )
+        st.video(single_result["video_bytes"])
+        st.download_button(
+            label="⬇️ Download Video",
+            data=single_result["video_bytes"],
+            file_name=single_result["output_name"],
+            mime="video/mp4",
+        )
 
-                with open(output_path, "rb") as file:
-                    video_bytes = file.read()
+# ── Bulk mode ─────────────────────────────────────────────────────────────────
+else:
+    st.info(
+        "Upload multiple videos, then enter the correct product name for every "
+        "video. All product-name fields are required."
+    )
 
+    uploaded_files = st.file_uploader(
+        "Upload Videos (MP4 or MOV)",
+        type=["mp4", "mov"],
+        accept_multiple_files=True,
+        key="bulk_uploader",
+    )
+
+    if uploaded_files:
+        st.subheader("Product names")
+        product_names: list[str] = []
+
+        for index, uploaded_file in enumerate(uploaded_files, start=1):
+            st.markdown(f"**{index}. {uploaded_file.name}**")
+            product_name = st.text_input(
+                f"Product name for video {index}",
+                placeholder="Enter the product name shown in this video",
+                key=f"bulk_product_{index}_{uploaded_file.name}_{uploaded_file.size}",
+                label_visibility="collapsed",
+            )
+            product_names.append(product_name.strip())
+
+        missing_name_numbers = [
+            str(index)
+            for index, name in enumerate(product_names, start=1)
+            if not name
+        ]
+
+        if missing_name_numbers:
+            st.caption(
+                "Product name still needed for video(s): "
+                + ", ".join(missing_name_numbers)
+            )
+
+        bulk_disabled = (
+            bool(missing_name_numbers)
+            or music_count == 0
+            or bool(missing_tools)
+        )
+
+        if st.button(
+            f"✨ Process All {len(uploaded_files)} Videos",
+            disabled=bulk_disabled,
+        ):
+            st.session_state.pop("bulk_results", None)
+            st.session_state.pop("bulk_errors", None)
+            st.session_state.pop("bulk_zip", None)
+
+            results: list[dict] = []
+            errors: list[dict] = []
+            progress = st.progress(0)
+            status = st.empty()
+
+            with tempfile.TemporaryDirectory() as temp_dir:
+                total = len(uploaded_files)
+
+                for index, (uploaded_file, product_name) in enumerate(
+                    zip(uploaded_files, product_names),
+                    start=1,
+                ):
+                    status.write(
+                        f"Processing {index} of {total}: **{uploaded_file.name}**"
+                    )
+
+                    try:
+                        result = process_uploaded_video(
+                            uploaded_file=uploaded_file,
+                            product_name=product_name,
+                            temp_dir=temp_dir,
+                            item_index=index,
+                        )
+                        results.append(result)
+                    except Exception as error:
+                        errors.append(
+                            {
+                                "source_name": uploaded_file.name,
+                                "error": str(error),
+                            }
+                        )
+
+                    progress.progress(index / total)
+
+            status.empty()
+
+            signature = uploaded_signature(uploaded_files)
+            names_signature = tuple(product_names)
+
+            st.session_state["bulk_results"] = {
+                "items": results,
+                "input_signature": signature,
+                "names_signature": names_signature,
+            }
+            st.session_state["bulk_errors"] = {
+                "items": errors,
+                "input_signature": signature,
+                "names_signature": names_signature,
+            }
+
+            if results:
+                st.session_state["bulk_zip"] = {
+                    "data": create_zip_bytes(results),
+                    "input_signature": signature,
+                    "names_signature": names_signature,
+                }
+
+        current_signature = uploaded_signature(uploaded_files)
+        current_names_signature = tuple(product_names)
+        bulk_results_state = st.session_state.get("bulk_results")
+        bulk_errors_state = st.session_state.get("bulk_errors")
+        bulk_zip_state = st.session_state.get("bulk_zip")
+
+        signatures_match = (
+            bulk_results_state
+            and bulk_results_state.get("input_signature") == current_signature
+            and bulk_results_state.get("names_signature") == current_names_signature
+        )
+
+        if signatures_match:
+            results = bulk_results_state.get("items", [])
+            errors = (
+                bulk_errors_state.get("items", [])
+                if bulk_errors_state
+                else []
+            )
+
+            if results:
                 st.success(
-                    f"✅ Done! Used {emoji} **{sale_text}** | "
-                    f"**{urgency_text}** | 🎵 **{selected_song.stem}**"
-                )
-                st.video(video_bytes)
-                st.download_button(
-                    label="⬇️ Download Video",
-                    data=video_bytes,
-                    file_name=(
-                        f"{product_name.strip().replace(' ', '_')}_edited.mp4"
-                    ),
-                    mime="video/mp4",
+                    f"✅ Finished {len(results)} of {len(uploaded_files)} videos."
                 )
 
-            except Exception as error:
-                st.error("The video could not be processed.")
-                with st.expander("Technical error details"):
-                    st.code(str(error))
+                if (
+                    bulk_zip_state
+                    and bulk_zip_state.get("input_signature") == current_signature
+                    and bulk_zip_state.get("names_signature")
+                    == current_names_signature
+                ):
+                    st.download_button(
+                        label="⬇️ Download All Videos as ZIP",
+                        data=bulk_zip_state["data"],
+                        file_name="scrap_roll_edited_videos.zip",
+                        mime="application/zip",
+                    )
+
+                st.subheader("Individual downloads")
+                for result in results:
+                    with st.expander(
+                        f"{result['product_name']} — {result['source_name']}"
+                    ):
+                        st.caption(
+                            f"{result['emoji']} {result['sale_text']} | "
+                            f"{result['urgency_text']} | "
+                            f"🎵 {result['song_name']}"
+                        )
+                        st.video(result["video_bytes"])
+                        st.download_button(
+                            label=f"⬇️ Download {result['output_name']}",
+                            data=result["video_bytes"],
+                            file_name=result["output_name"],
+                            mime="video/mp4",
+                            key=f"download_{result['output_name']}",
+                        )
+
+            if errors:
+                st.error(f"{len(errors)} video(s) could not be processed.")
+                with st.expander("Failed-video details"):
+                    for error_item in errors:
+                        st.markdown(f"**{error_item['source_name']}**")
+                        st.code(error_item["error"])
+    else:
+        st.caption("Add two or more videos to begin a bulk batch.")
