@@ -11,6 +11,7 @@ from PIL import Image, ImageDraw, ImageFont
 BASE_DIR = Path(__file__).resolve().parent
 FONT_PATH = BASE_DIR / "TikTokSans-Medium.ttf"
 MUSIC_FOLDER = BASE_DIR / "music"
+EMOJI_FOLDER = BASE_DIR / "emoji_assets"
 
 # Linux/Streamlit Cloud emoji font, with macOS fallbacks for local testing.
 EMOJI_FONT_CANDIDATES = [
@@ -38,12 +39,12 @@ URGENCY_TEXTS = [
     "LAST CHANCE",
 ]
 
-EMOJI_PAIRS = [
-    ("🚨", "🚨"),
-    ("⚡", "⚡"),
-    ("🔥", "🔥"),
-    ("💥", "💥"),
-    ("⏰", "⏰"),
+EMOJI_CHOICES = [
+    ("🚨", "alert.png"),
+    ("⚡", "lightning.png"),
+    ("🔥", "fire.png"),
+    ("💥", "boom.png"),
+    ("⏰", "clock.png"),
 ]
 
 # ── Design constants ──────────────────────────────────────────────────────────
@@ -66,6 +67,11 @@ PROD_FONT = 58
 PROD_GAP = 20
 PROD_STROKE = 7
 BADGE_TOP = int(CANVAS_H * 0.115)
+
+# Apple-style PNGs are rendered at this size. Increase or decrease as desired.
+EMOJI_RENDER_SIZE = 58
+EMOJI_GAP = 14
+EMOJI_FONT_RENDER_SIZE = 109
 
 
 def run_command(command: list[str]) -> subprocess.CompletedProcess:
@@ -100,12 +106,86 @@ def load_text_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
         return ImageFont.load_default()
 
 
+def load_emoji_png(filename: str) -> Image.Image | None:
+    """Load an optional transparent emoji PNG and resize it cleanly."""
+    emoji_path = EMOJI_FOLDER / filename
+    if not emoji_path.exists():
+        return None
+
+    try:
+        with Image.open(emoji_path) as source:
+            emoji = source.convert("RGBA")
+
+        emoji.thumbnail(
+            (EMOJI_RENDER_SIZE, EMOJI_RENDER_SIZE),
+            Image.Resampling.LANCZOS,
+        )
+        return emoji
+    except Exception:
+        return None
+
+
+def render_font_emoji(emoji_character: str) -> Image.Image | None:
+    """Render Noto/Apple color emoji large, then downscale it.
+
+    Noto Color Emoji often only accepts its embedded bitmap size. Rendering at
+    109 px and reducing the result lets us display a smaller emoji reliably.
+    """
+    emoji_font_path = find_emoji_font()
+    if not emoji_font_path:
+        return None
+
+    try:
+        emoji_font = ImageFont.truetype(
+            str(emoji_font_path),
+            EMOJI_FONT_RENDER_SIZE,
+            index=0,
+        )
+
+        measure_image = Image.new("RGBA", (200, 200), (0, 0, 0, 0))
+        measure_draw = ImageDraw.Draw(measure_image)
+        bbox = measure_draw.textbbox(
+            (0, 0),
+            emoji_character,
+            font=emoji_font,
+            embedded_color=True,
+        )
+
+        width = max(1, bbox[2] - bbox[0])
+        height = max(1, bbox[3] - bbox[1])
+        rendered = Image.new("RGBA", (width + 12, height + 12), (0, 0, 0, 0))
+        rendered_draw = ImageDraw.Draw(rendered)
+        rendered_draw.text(
+            (6 - bbox[0], 6 - bbox[1]),
+            emoji_character,
+            font=emoji_font,
+            embedded_color=True,
+        )
+
+        crop_box = rendered.getbbox()
+        if crop_box:
+            rendered = rendered.crop(crop_box)
+
+        rendered.thumbnail(
+            (EMOJI_RENDER_SIZE, EMOJI_RENDER_SIZE),
+            Image.Resampling.LANCZOS,
+        )
+        return rendered
+    except Exception:
+        return None
+
+
+def get_emoji_image(emoji_character: str, filename: str) -> Image.Image | None:
+    """Prefer the supplied Apple-style PNG, then use a font fallback."""
+    return load_emoji_png(filename) or render_font_emoji(emoji_character)
+
+
 def make_banner_overlay(
     product_name: str,
     out_path: str,
     sale_text: str,
     urgency_text: str,
-    emoji_pair: tuple[str, str],
+    emoji_choice: tuple[str, str],
 ) -> None:
     img = Image.new("RGBA", (CANVAS_W, CANVAS_H), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
@@ -121,34 +201,26 @@ def make_banner_overlay(
     red_text_w, red_text_h = text_size(sale_text, font_red)
     white_text_w, white_text_h = text_size(urgency_text, font_white)
 
-    emoji_size = 109
-    emoji_gap = 12
-    emoji_width = 0
-    emoji_font = None
-    emoji_font_path = find_emoji_font()
-    emoji_left, emoji_right = emoji_pair
+    emoji_character, emoji_filename = emoji_choice
+    emoji_image = get_emoji_image(emoji_character, emoji_filename)
 
-    if emoji_font_path:
-        try:
-            emoji_font = ImageFont.truetype(str(emoji_font_path), emoji_size, index=0)
-            emoji_box = draw.textbbox((0, 0), emoji_left, font=emoji_font)
-            emoji_width = emoji_box[2] - emoji_box[0]
-        except Exception:
-            emoji_font = None
-
-    if emoji_font:
+    if emoji_image:
+        emoji_width, emoji_height = emoji_image.size
         content_width = (
             emoji_width
-            + emoji_gap
+            + EMOJI_GAP
             + red_text_w
-            + emoji_gap
+            + EMOJI_GAP
             + emoji_width
         )
+        red_content_height = max(red_text_h, emoji_height)
     else:
+        emoji_width = emoji_height = 0
         content_width = red_text_w
+        red_content_height = red_text_h
 
     red_pill_w = content_width + (RED_PAD_X * 2)
-    red_pill_h = red_text_h + (RED_PAD_Y * 2)
+    red_pill_h = red_content_height + (RED_PAD_Y * 2)
     white_pill_w = white_text_w + (WHITE_PAD_X * 2)
     white_pill_h = white_text_h + (WHITE_PAD_Y * 2)
 
@@ -181,38 +253,28 @@ def make_banner_overlay(
 
     red_center_y = red_pill_y + (red_pill_h // 2)
 
-    if emoji_font:
+    if emoji_image:
         left_x = red_pill_x + RED_PAD_X
+        emoji_y = red_center_y - (emoji_height // 2)
+
+        img.alpha_composite(emoji_image, (left_x, emoji_y))
         draw.text(
-            (left_x, red_center_y),
-            emoji_left,
-            font=emoji_font,
-            embedded_color=True,
-            anchor="lm",
-        )
-        draw.text(
-            (left_x + emoji_width + emoji_gap, red_center_y),
+            (left_x + emoji_width + EMOJI_GAP, red_center_y),
             sale_text,
             font=font_red,
             fill=WHITE_COLOR,
             anchor="lm",
         )
-        draw.text(
-            (
-                left_x
-                + emoji_width
-                + emoji_gap
-                + red_text_w
-                + emoji_gap,
-                red_center_y,
-            ),
-            emoji_right,
-            font=emoji_font,
-            embedded_color=True,
-            anchor="lm",
+
+        right_x = (
+            left_x
+            + emoji_width
+            + EMOJI_GAP
+            + red_text_w
+            + EMOJI_GAP
         )
+        img.alpha_composite(emoji_image.copy(), (right_x, emoji_y))
     else:
-        # Fall back to plain text if the server cannot render color emoji.
         draw.text(
             (red_pill_x + (red_pill_w // 2), red_center_y),
             sale_text,
@@ -436,6 +498,20 @@ else:
         "`music` beside `app.py`, then commit the folder to GitHub."
     )
 
+apple_emoji_count = sum(
+    1 for _, filename in EMOJI_CHOICES if (EMOJI_FOLDER / filename).exists()
+)
+if apple_emoji_count:
+    st.caption(
+        f"🍎 {apple_emoji_count}/5 Apple-style emoji PNG(s) available; "
+        "missing images use the server emoji font."
+    )
+else:
+    st.caption(
+        "Emoji fallback is active. Add an `emoji_assets` folder for exact "
+        "Apple-style PNGs."
+    )
+
 product_name = st.text_input(
     "Product Name",
     placeholder="e.g. HiSmile Mouthwash",
@@ -488,7 +564,7 @@ if st.button("✨ Process Video", disabled=process_disabled):
 
             sale_text = random.choice(SALE_TEXTS)
             urgency_text = random.choice(URGENCY_TEXTS)
-            emoji_pair = random.choice(EMOJI_PAIRS)
+            emoji_choice = random.choice(EMOJI_CHOICES)
             selected_song = choose_random_song()
 
             try:
@@ -497,7 +573,7 @@ if st.button("✨ Process Video", disabled=process_disabled):
                     out_path=overlay_path,
                     sale_text=sale_text,
                     urgency_text=urgency_text,
-                    emoji_pair=emoji_pair,
+                    emoji_choice=emoji_choice,
                 )
 
                 process_video(
@@ -514,7 +590,7 @@ if st.button("✨ Process Video", disabled=process_disabled):
                     video_bytes = file.read()
 
                 st.success(
-                    f"✅ Done! Used {emoji_pair[0]} **{sale_text}** | "
+                    f"✅ Done! Used {emoji_choice[0]} **{sale_text}** | "
                     f"**{urgency_text}** | 🎵 **{selected_song.stem}**"
                 )
                 st.video(video_bytes)
