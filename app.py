@@ -1,5 +1,6 @@
 import os
 import random
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -11,8 +12,9 @@ from PIL import Image, ImageDraw, ImageFont
 BASE_DIR = Path(__file__).resolve().parent
 FONT_PATH = BASE_DIR / "TikTokSans-Medium.ttf"
 MUSIC_FOLDER = BASE_DIR / "music"
+EMOJI_ASSET_FOLDER = BASE_DIR / "emoji_assets"
 
-# Linux/Streamlit Cloud emoji font, with macOS fallbacks for local testing.
+# Streamlit Cloud/Linux font, followed by macOS fallbacks for local testing.
 EMOJI_FONT_CANDIDATES = [
     Path("/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf"),
     Path("/System/Library/Fonts/Apple Color Emoji.ttc"),
@@ -20,6 +22,15 @@ EMOJI_FONT_CANDIDATES = [
 ]
 
 SUPPORTED_MUSIC_FORMATS = {".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac"}
+
+# The PNG filenames should match the assets generated on the Mac.
+EMOJI_OPTIONS = [
+    ("🚨", "alert.png"),
+    ("⚡", "lightning.png"),
+    ("🔥", "fire.png"),
+    ("💥", "boom.png"),
+    ("⏰", "clock.png"),
+]
 
 # ── Text variations ───────────────────────────────────────────────────────────
 SALE_TEXTS = [
@@ -36,14 +47,6 @@ URGENCY_TEXTS = [
     "LIMITED TIME",
     "ALMOST GONE",
     "LAST CHANCE",
-]
-
-EMOJI_PAIRS = [
-    ("🚨", "🚨"),
-    ("⚡", "⚡"),
-    ("🔥", "🔥"),
-    ("💥", "💥"),
-    ("⏰", "⏰"),
 ]
 
 # ── Design constants ──────────────────────────────────────────────────────────
@@ -67,9 +70,13 @@ PROD_GAP = 20
 PROD_STROKE = 7
 BADGE_TOP = int(CANVAS_H * 0.115)
 
+# Requested settings.
+EMOJI_RENDER_SIZE = 80
+MUSIC_VOLUME = 1.0
+
 
 def run_command(command: list[str]) -> subprocess.CompletedProcess:
-    """Run a command and include useful FFmpeg output when it fails."""
+    """Run FFmpeg/FFprobe and expose useful error information."""
     try:
         return subprocess.run(
             command,
@@ -79,18 +86,12 @@ def run_command(command: list[str]) -> subprocess.CompletedProcess:
         )
     except FileNotFoundError as exc:
         raise RuntimeError(
-            "FFmpeg/FFprobe was not found. Make sure FFmpeg is installed."
+            "FFmpeg or FFprobe is missing. Confirm packages.txt is in the "
+            "GitHub repository root and contains the line: ffmpeg"
         ) from exc
     except subprocess.CalledProcessError as exc:
         details = (exc.stderr or exc.stdout or "Unknown FFmpeg error").strip()
-        raise RuntimeError(details[-4000:]) from exc
-
-
-def find_emoji_font() -> Path | None:
-    for font_path in EMOJI_FONT_CANDIDATES:
-        if font_path.exists():
-            return font_path
-    return None
+        raise RuntimeError(details[-5000:]) from exc
 
 
 def load_text_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
@@ -100,12 +101,79 @@ def load_text_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
         return ImageFont.load_default()
 
 
+def find_emoji_font() -> Path | None:
+    for font_path in EMOJI_FONT_CANDIDATES:
+        if font_path.exists():
+            return font_path
+    return None
+
+
+def load_emoji_image(emoji: str, asset_filename: str) -> Image.Image | None:
+    """
+    Prefer an Apple-style transparent PNG from emoji_assets.
+    If unavailable, render Noto/Apple Color Emoji and resize it to 80px.
+    """
+    asset_path = EMOJI_ASSET_FOLDER / asset_filename
+
+    if asset_path.exists():
+        try:
+            image = Image.open(asset_path).convert("RGBA")
+            image.thumbnail(
+                (EMOJI_RENDER_SIZE, EMOJI_RENDER_SIZE),
+                Image.Resampling.LANCZOS,
+            )
+            return image
+        except Exception:
+            pass
+
+    font_path = find_emoji_font()
+    if not font_path:
+        return None
+
+    try:
+        # Noto Color Emoji commonly renders only at its embedded 109px strike.
+        render_size = 109
+        emoji_font = ImageFont.truetype(
+            str(font_path),
+            render_size,
+            index=0,
+        )
+
+        temp = Image.new("RGBA", (180, 180), (0, 0, 0, 0))
+        temp_draw = ImageDraw.Draw(temp)
+        bbox = temp_draw.textbbox((0, 0), emoji, font=emoji_font)
+
+        x = 90 - ((bbox[2] - bbox[0]) // 2) - bbox[0]
+        y = 90 - ((bbox[3] - bbox[1]) // 2) - bbox[1]
+
+        temp_draw.text(
+            (x, y),
+            emoji,
+            font=emoji_font,
+            embedded_color=True,
+        )
+
+        alpha_bbox = temp.getbbox()
+        if not alpha_bbox:
+            return None
+
+        cropped = temp.crop(alpha_bbox)
+        cropped.thumbnail(
+            (EMOJI_RENDER_SIZE, EMOJI_RENDER_SIZE),
+            Image.Resampling.LANCZOS,
+        )
+        return cropped
+    except Exception:
+        return None
+
+
 def make_banner_overlay(
     product_name: str,
     out_path: str,
     sale_text: str,
     urgency_text: str,
-    emoji_pair: tuple[str, str],
+    emoji: str,
+    emoji_asset: str,
 ) -> None:
     img = Image.new("RGBA", (CANVAS_W, CANVAS_H), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
@@ -121,34 +189,22 @@ def make_banner_overlay(
     red_text_w, red_text_h = text_size(sale_text, font_red)
     white_text_w, white_text_h = text_size(urgency_text, font_white)
 
-    emoji_size = 96
-    emoji_gap = 12
-    emoji_width = 0
-    emoji_font = None
-    emoji_font_path = find_emoji_font()
-    emoji_left, emoji_right = emoji_pair
+    emoji_image = load_emoji_image(emoji, emoji_asset)
+    emoji_gap = 18
 
-    if emoji_font_path:
-        try:
-            emoji_font = ImageFont.truetype(str(emoji_font_path), emoji_size, index=0)
-            emoji_box = draw.textbbox((0, 0), emoji_left, font=emoji_font)
-            emoji_width = emoji_box[2] - emoji_box[0]
-        except Exception:
-            emoji_font = None
-
-    if emoji_font:
+    if emoji_image:
+        emoji_w, emoji_h = emoji_image.size
         content_width = (
-            emoji_width
-            + emoji_gap
-            + red_text_w
-            + emoji_gap
-            + emoji_width
+            emoji_w + emoji_gap + red_text_w + emoji_gap + emoji_w
         )
+        red_content_h = max(red_text_h, emoji_h)
     else:
+        emoji_w = emoji_h = 0
         content_width = red_text_w
+        red_content_h = red_text_h
 
     red_pill_w = content_width + (RED_PAD_X * 2)
-    red_pill_h = red_text_h + (RED_PAD_Y * 2)
+    red_pill_h = red_content_h + (RED_PAD_Y * 2)
     white_pill_w = white_text_w + (WHITE_PAD_X * 2)
     white_pill_h = white_text_h + (WHITE_PAD_Y * 2)
 
@@ -158,61 +214,47 @@ def make_banner_overlay(
     white_pill_y = red_pill_y + red_pill_h
 
     draw.rounded_rectangle(
-        [
+        (
             red_pill_x,
             red_pill_y,
             red_pill_x + red_pill_w,
             red_pill_y + red_pill_h,
-        ],
+        ),
         radius=RED_RADIUS,
         fill=RED_COLOR,
     )
 
     draw.rounded_rectangle(
-        [
+        (
             white_pill_x,
             white_pill_y,
             white_pill_x + white_pill_w,
             white_pill_y + white_pill_h,
-        ],
+        ),
         radius=WHITE_RADIUS,
         fill=WHITE_COLOR,
     )
 
     red_center_y = red_pill_y + (red_pill_h // 2)
 
-    if emoji_font:
-        left_x = red_pill_x + RED_PAD_X
+    if emoji_image:
+        cursor_x = red_pill_x + RED_PAD_X
+        emoji_y = red_center_y - (emoji_h // 2)
+
+        img.alpha_composite(emoji_image, (cursor_x, emoji_y))
+        cursor_x += emoji_w + emoji_gap
+
         draw.text(
-            (left_x, red_center_y),
-            emoji_left,
-            font=emoji_font,
-            embedded_color=True,
-            anchor="lm",
-        )
-        draw.text(
-            (left_x + emoji_width + emoji_gap, red_center_y),
+            (cursor_x, red_center_y),
             sale_text,
             font=font_red,
             fill=WHITE_COLOR,
             anchor="lm",
         )
-        draw.text(
-            (
-                left_x
-                + emoji_width
-                + emoji_gap
-                + red_text_w
-                + emoji_gap,
-                red_center_y,
-            ),
-            emoji_right,
-            font=emoji_font,
-            embedded_color=True,
-            anchor="lm",
-        )
+        cursor_x += red_text_w + emoji_gap
+
+        img.alpha_composite(emoji_image, (cursor_x, emoji_y))
     else:
-        # Fall back to plain text if the server cannot render color emoji.
         draw.text(
             (red_pill_x + (red_pill_w // 2), red_center_y),
             sale_text,
@@ -265,30 +307,12 @@ def get_video_duration(input_path: str) -> float:
     try:
         duration = float(result.stdout.strip())
     except ValueError as exc:
-        raise RuntimeError("Could not determine the uploaded video's duration.") from exc
+        raise RuntimeError("Could not determine the video duration.") from exc
 
     if duration <= 0:
         raise RuntimeError("The uploaded video has an invalid duration.")
 
     return duration
-
-
-def video_has_audio(input_path: str) -> bool:
-    result = run_command(
-        [
-            "ffprobe",
-            "-v",
-            "error",
-            "-select_streams",
-            "a:0",
-            "-show_entries",
-            "stream=index",
-            "-of",
-            "csv=p=0",
-            input_path,
-        ]
-    )
-    return bool(result.stdout.strip())
 
 
 def get_music_files() -> list[Path]:
@@ -308,14 +332,13 @@ def choose_random_song() -> Path:
 
     if not songs:
         raise RuntimeError(
-            "No songs were found. Create a folder named 'music' beside app.py "
-            "and add your MP3, WAV, M4A, AAC, OGG, or FLAC files."
+            "No songs were found. Create a folder named music beside app.py "
+            "and place the audio files inside it."
         )
 
     previous_song = st.session_state.get("last_song")
     choices = [song for song in songs if song.name != previous_song]
 
-    # With only one song, reusing it is unavoidable.
     selected_song = random.choice(choices or songs)
     st.session_state["last_song"] = selected_song.name
     return selected_song
@@ -326,16 +349,11 @@ def process_video(
     overlay_path: str,
     music_path: str,
     output_path: str,
-    music_volume: float,
-    keep_original_audio: bool,
-    original_audio_volume: float,
 ) -> None:
     source_duration = get_video_duration(input_path)
     finished_duration = source_duration * 2
-    has_original_audio = video_has_audio(input_path)
 
-    # The video is played forward and then reversed, matching the original app.
-    video_filters = (
+    filter_complex = (
         f"[0:v]"
         f"scale={CANVAS_W}:{CANVAS_H}:force_original_aspect_ratio=increase,"
         f"crop={CANVAS_W}:{CANVAS_H},setsar=1,"
@@ -343,33 +361,13 @@ def process_video(
         f"[reverse_source]reverse[backward];"
         f"[forward][backward]concat=n=2:v=1:a=0[video_loop];"
         f"[1:v]format=rgba[overlay_image];"
-        f"[video_loop][overlay_image]overlay=0:0:format=auto[v_final]"
-    )
-
-    music_filter = (
-        f"[2:a]atrim=0:{finished_duration:.6f},"
+        f"[video_loop][overlay_image]overlay=0:0:format=auto[v_final];"
+        f"[2:a]"
+        f"atrim=0:{finished_duration:.6f},"
         f"asetpts=PTS-STARTPTS,"
-        f"volume={music_volume:.3f}[music]"
+        f"volume={MUSIC_VOLUME:.3f},"
+        f"alimiter=limit=0.95[a_final]"
     )
-
-    if keep_original_audio and has_original_audio:
-        # Keep the source audio during the forward half. The reverse half uses
-        # music only, avoiding duplicated or backwards speech.
-        audio_filters = (
-            f"{music_filter};"
-            f"[0:a]atrim=0:{source_duration:.6f},"
-            f"asetpts=PTS-STARTPTS,"
-            f"volume={original_audio_volume:.3f},"
-            f"apad=whole_dur={finished_duration:.6f},"
-            f"atrim=0:{finished_duration:.6f}[original_audio];"
-            f"[original_audio][music]"
-            f"amix=inputs=2:duration=longest:dropout_transition=0,"
-            f"alimiter=limit=0.95[a_final]"
-        )
-    else:
-        audio_filters = f"{music_filter};[music]alimiter=limit=0.95[a_final]"
-
-    filter_complex = f"{video_filters};{audio_filters}"
 
     command = [
         "ffmpeg",
@@ -427,13 +425,24 @@ st.markdown(
     "version with a randomly selected background song."
 )
 
+# Helpful deployment diagnostic.
+missing_tools = [
+    tool for tool in ("ffmpeg", "ffprobe") if shutil.which(tool) is None
+]
+if missing_tools:
+    st.error(
+        "Server setup is incomplete. Missing: "
+        + ", ".join(missing_tools)
+        + ". Add packages.txt to the repository root and reboot the app."
+    )
+
 music_count = len(get_music_files())
 if music_count:
     st.caption(f"🎵 {music_count} music track(s) available")
 else:
     st.warning(
-        "No music tracks found yet. Add your 15 audio files to a folder named "
-        "`music` beside `app.py`, then commit the folder to GitHub."
+        "No music tracks found. Add the audio files to a folder named `music` "
+        "beside `app.py`, then commit the folder to GitHub."
     )
 
 product_name = st.text_input(
@@ -446,34 +455,12 @@ uploaded = st.file_uploader(
     type=["mp4", "mov"],
 )
 
-with st.expander("🎵 Audio settings"):
-    music_volume_percent = st.slider(
-        "Background music volume",
-        min_value=0,
-        max_value=100,
-        value=18,
-        step=1,
-    )
-
-    keep_original_audio = st.checkbox(
-        "Keep original video audio",
-        value=True,
-        help=(
-            "Original audio plays during the forward half. The randomly selected "
-            "song continues through the entire finished video."
-        ),
-    )
-
-    original_audio_percent = st.slider(
-        "Original audio volume",
-        min_value=0,
-        max_value=100,
-        value=100,
-        step=1,
-        disabled=not keep_original_audio,
-    )
-
-process_disabled = not (product_name.strip() and uploaded and music_count > 0)
+process_disabled = (
+    not product_name.strip()
+    or uploaded is None
+    or music_count == 0
+    or bool(missing_tools)
+)
 
 if st.button("✨ Process Video", disabled=process_disabled):
     with st.spinner("Processing your video..."):
@@ -488,7 +475,7 @@ if st.button("✨ Process Video", disabled=process_disabled):
 
             sale_text = random.choice(SALE_TEXTS)
             urgency_text = random.choice(URGENCY_TEXTS)
-            emoji_pair = random.choice(EMOJI_PAIRS)
+            emoji, emoji_asset = random.choice(EMOJI_OPTIONS)
             selected_song = choose_random_song()
 
             try:
@@ -497,7 +484,8 @@ if st.button("✨ Process Video", disabled=process_disabled):
                     out_path=overlay_path,
                     sale_text=sale_text,
                     urgency_text=urgency_text,
-                    emoji_pair=emoji_pair,
+                    emoji=emoji,
+                    emoji_asset=emoji_asset,
                 )
 
                 process_video(
@@ -505,16 +493,13 @@ if st.button("✨ Process Video", disabled=process_disabled):
                     overlay_path=overlay_path,
                     music_path=str(selected_song),
                     output_path=output_path,
-                    music_volume=music_volume_percent / 100,
-                    keep_original_audio=keep_original_audio,
-                    original_audio_volume=original_audio_percent / 100,
                 )
 
                 with open(output_path, "rb") as file:
                     video_bytes = file.read()
 
                 st.success(
-                    f"✅ Done! Used {emoji_pair[0]} **{sale_text}** | "
+                    f"✅ Done! Used {emoji} **{sale_text}** | "
                     f"**{urgency_text}** | 🎵 **{selected_song.stem}**"
                 )
                 st.video(video_bytes)
